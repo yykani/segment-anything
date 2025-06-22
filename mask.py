@@ -93,15 +93,50 @@ def iou(mask1, mask2):
     union = np.logical_or(mask1, mask2).sum()
     return inter / union if union > 0 else 0
 
+def mask_sample_points(mask, num_points=8):
+    """マスクの輪郭から等間隔でnum_points個の点をサンプリング"""
+    import cv2
+    mask_uint8 = (mask.astype(np.uint8)) * 255
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return []
+    cnt = max(contours, key=cv2.contourArea)
+    if len(cnt) < num_points:
+        points = cnt[:, 0, :]
+    else:
+        idxs = np.linspace(0, len(cnt)-1, num_points, dtype=int)
+        points = cnt[idxs, 0, :]
+    return [tuple(pt) for pt in points]
+
 def process_rest_frames_similarity():
-    print("[類似度で処理] 開始", flush=True)
+    print("[類似度で処理:複数点] 開始", flush=True)
     method = "similarity"
     out_dir = os.path.join(masks_dir, method)
     os.makedirs(out_dir, exist_ok=True)
-    # 1フレーム目のマスクを全フレームにコピーして保存（超簡素化）
-    for frame_path in frame_paths:
-        save_mask(mask, os.path.join(out_dir, os.path.basename(frame_path)))
-        print(f"saved: {os.path.basename(frame_path)}", flush=True)
+    # 1フレーム目のマスクを保存
+    save_mask(mask, os.path.join(out_dir, os.path.basename(frame_paths[0])))
+    prev_mask = mask.copy()
+    for i, frame_path in enumerate(frame_paths[1:], 1):
+        img = np.array(Image.open(frame_path).convert("RGB"))
+        predictor.set_image(img)
+        # 前マスクの輪郭から複数点をサンプリング
+        points = mask_sample_points(prev_mask, num_points=8)
+        if not points:
+            print(f"frame {i}: no points found, skipping", flush=True)
+            continue
+        input_point = np.array(points)
+        input_label = np.ones(len(points), dtype=int)
+        masks, scores, logits = predictor.predict(
+            point_coords=input_point,
+            point_labels=input_label,
+            multimask_output=True
+        )
+        # 前マスクとIoU最大のマスクを選択
+        ious = [iou(prev_mask, m) for m in masks]
+        best_idx = int(np.argmax(ious))
+        prev_mask = masks[best_idx]
+        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_path)))
+        print(f"frame {i}: similarity mask saved (IoU={ious[best_idx]:.3f})", flush=True)
     print(f"[類似度で処理] 完了: {out_dir}", flush=True)
 
 # --- GUIセットアップ ---
@@ -226,13 +261,48 @@ def iou(mask1, mask2):
     union = np.logical_or(mask1, mask2).sum()
     return inter / union if union > 0 else 0
 
+def mask_sample_points(mask, num_points=8):
+    """マスクの輪郭から等間隔でnum_points個の点をサンプリング"""
+    import cv2
+    mask_uint8 = (mask.astype(np.uint8)) * 255
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return []
+    cnt = max(contours, key=cv2.contourArea)
+    if len(cnt) < num_points:
+        points = cnt[:, 0, :]
+    else:
+        idxs = np.linspace(0, len(cnt)-1, num_points, dtype=int)
+        points = cnt[idxs, 0, :]
+    return [tuple(pt) for pt in points]
+
 def process_rest_frames_similarity():
-    print("[類似度で処理] 開始", flush=True)
+    print("[類似度で処理:複数点] 開始", flush=True)
     method = "similarity"
     out_dir = os.path.join(masks_dir, method)
     os.makedirs(out_dir, exist_ok=True)
-    # 1フレーム目のマスクを全フレームにコピーして保存（超簡素化）
-    for frame_path in frame_paths:
-        save_mask(mask, os.path.join(out_dir, os.path.basename(frame_path)))
-        print(f"saved: {os.path.basename(frame_path)}", flush=True)
+    # 1フレーム目のマスクを保存
+    save_mask(mask, os.path.join(out_dir, os.path.basename(frame_paths[0])))
+    prev_mask = mask.copy()
+    for i, frame_path in enumerate(frame_paths[1:], 1):
+        img = np.array(Image.open(frame_path).convert("RGB"))
+        predictor.set_image(img)
+        # 前マスクの輪郭から複数点をサンプリング
+        points = mask_sample_points(prev_mask, num_points=8)
+        if not points:
+            print(f"frame {i}: no points found, skipping", flush=True)
+            continue
+        input_point = np.array(points)
+        input_label = np.ones(len(points), dtype=int)
+        masks, scores, logits = predictor.predict(
+            point_coords=input_point,
+            point_labels=input_label,
+            multimask_output=True
+        )
+        # 前マスクとIoU最大のマスクを選択
+        ious = [iou(prev_mask, m) for m in masks]
+        best_idx = int(np.argmax(ious))
+        prev_mask = masks[best_idx]
+        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_path)))
+        print(f"frame {i}: similarity mask saved (IoU={ious[best_idx]:.3f})", flush=True)
     print(f"[類似度で処理] 完了: {out_dir}", flush=True)
