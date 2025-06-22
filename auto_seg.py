@@ -5,7 +5,7 @@ from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 import itertools
 import os
 
-IMAGE_PATH = "path/to/your/image.png"
+IMAGE_PATH = "assets/frame_0000.png"
 MODEL_PATH = "models/sam_vit_h_4b8939.pth"
 MODEL_TYPE = "vit_h"  # vit_h, vit_l, vit_b
 
@@ -39,9 +39,21 @@ for idx, (pps, pit, sst, mmra) in enumerate(param_combinations):
         min_mask_region_area=mmra
     )
     masks = mask_generator.generate(image)
-    out_dir = f"sam_masks/pattern_{idx+1:02d}_pps{pps}_iou{pit}_sst{sst}_area{mmra}"
+    out_dir = f"output/auto_seg/pattern_{idx+1:02d}_pps{pps}_iou{pit}_sst{sst}_area{mmra}"
     os.makedirs(out_dir, exist_ok=True)
     print(f"領域数: {len(masks)}")
+    # 全マスクを元画像に重ねてカラーマスク画像を作成
+    overlay = image.copy()
+    # 色リスト（マスク数が多い場合はループ）
+    color_list = [
+        [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [255, 0, 255], [0, 255, 255],
+        [128, 0, 0], [0, 128, 0], [0, 0, 128], [128, 128, 0], [128, 0, 128], [0, 128, 128],
+        [255, 128, 0], [0, 255, 128], [128, 0, 255], [255, 0, 128], [0, 128, 255], [128, 255, 0]
+    ]
     for i, m in enumerate(masks):
         mask_img = (m['segmentation'].astype(np.uint8)) * 255
         Image.fromarray(mask_img).save(os.path.join(out_dir, f"mask_{i:03d}.png"))
+        color = color_list[i % len(color_list)]
+        overlay[m['segmentation']] = (0.5 * overlay[m['segmentation']] + 0.5 * color).astype(np.uint8)
+    # オーバーレイ画像を保存
+    Image.fromarray(overlay).save(os.path.join(out_dir, "overlay_all.png"))

@@ -62,32 +62,7 @@ def mask_centroid(mask):
         return None
     return int(xs.mean()), int(ys.mean())
 
-def process_rest_frames_centroid():
-    print("[重心で処理] 開始", flush=True)
-    method = "centroid"
-    out_dir = os.path.join(masks_dir, method)
-    os.makedirs(out_dir, exist_ok=True)
-    total = len(frame_paths)
-    # 最初のマスクを保存
-    save_mask(mask_main_only, os.path.join(out_dir, os.path.basename(frame_paths[0])))
-    prev_mask = mask_main_only.copy()
-    for i, frame_path in enumerate(tqdm(frame_paths[1:], desc="centroid", unit="frame"), 1):
-        img = np.array(Image.open(frame_path).convert("RGB"))
-        predictor.set_image(img)
-        centroid = mask_centroid(prev_mask)
-        if centroid is None:
-            print(f"frame {i}: centroid not found, skipping", flush=True)
-            continue
-        input_point = np.array([centroid])
-        input_label = np.array([1])
-        masks, scores, logits = predictor.predict(
-            point_coords=input_point,
-            point_labels=input_label,
-            multimask_output=False
-        )
-        prev_mask = masks[0]
-        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_paths[i])))
-    print(f"[重心で処理] 完了: {out_dir}", flush=True)
+# 重心処理モードは削除
 
 def iou(mask1, mask2):
     inter = np.logical_and(mask1, mask2).sum()
@@ -293,14 +268,6 @@ def update_mask():
     # デバッグ情報を表示
     print(f"マスク更新: main={np.sum(mask_main)} pixels, other={np.sum(mask_other)} pixels, main_only={np.sum(mask_main_only)} pixels")
 
-# クリックモード切替
-frame_mode = tk.Frame(root)
-frame_mode.pack()
-rb_main = tk.Radiobutton(frame_mode, text="追跡対象追加", variable=click_mode, value="main")
-rb_main.pack(side=tk.LEFT)
-rb_other = tk.Radiobutton(frame_mode, text="除外用追加", variable=click_mode, value="other")
-rb_other.pack(side=tk.LEFT)
-
 # 色設定用の関数
 def choose_color(color_var, title):
     from tkinter import colorchooser
@@ -310,11 +277,6 @@ def choose_color(color_var, title):
         color_var[1] = color[1]
         color_var[2] = color[2]
         update_mask()
-
-# --- スレッド実行用関数 ---
-def run_in_thread(func):
-    t = threading.Thread(target=func)
-    t.start()
 
 # ボタン用フレーム
 frame_buttons = tk.Frame(root)
@@ -342,138 +304,9 @@ img_tk = ImageTk.PhotoImage(img_pil)
 panel.config(image=img_tk)
 panel.image = img_tk
 
+# --- スレッド実行用関数 ---
+def run_in_thread(func):
+    t = threading.Thread(target=func)
+    t.start()
+
 root.mainloop()
-
-def save_mask(mask, out_path):
-    # 0/1のuint8画像として保存
-    mask_img = (mask.astype(np.uint8)) * 255
-    Image.fromarray(mask_img).save(out_path)
-
-def mask_centroid(mask):
-    ys, xs = np.where(mask)
-    if len(xs) == 0 or len(ys) == 0:
-        return None
-    return int(xs.mean()), int(ys.mean())
-
-def process_rest_frames_centroid():
-    print("[重心で処理] 開始", flush=True)
-    method = "centroid"
-    out_dir = os.path.join(masks_dir, method)
-    os.makedirs(out_dir, exist_ok=True)
-    total = len(frame_paths)
-    # 最初のマスクを保存
-    save_mask(mask_main_only, os.path.join(out_dir, os.path.basename(frame_paths[0])))
-    prev_mask = mask_main_only.copy()
-    for i, frame_path in enumerate(tqdm(frame_paths[1:], desc="centroid", unit="frame"), 1):
-        img = np.array(Image.open(frame_path).convert("RGB"))
-        predictor.set_image(img)
-        centroid = mask_centroid(prev_mask)
-        if centroid is None:
-            print(f"frame {i}: centroid not found, skipping", flush=True)
-            continue
-        input_point = np.array([centroid])
-        input_label = np.array([1])
-        masks, scores, logits = predictor.predict(
-            point_coords=input_point,
-            point_labels=input_label,
-            multimask_output=False
-        )
-        prev_mask = masks[0]
-        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_paths[i])))
-    print(f"[重心で処理] 完了: {out_dir}", flush=True)
-
-def iou(mask1, mask2):
-    inter = np.logical_and(mask1, mask2).sum()
-    union = np.logical_or(mask1, mask2).sum()
-    return inter / union if union > 0 else 0
-
-def mask_sample_points(mask, num_points=8):
-    """マスクのすべての輪郭から等間隔でnum_points個ずつ点をサンプリング"""
-    import cv2
-    mask_uint8 = (mask.astype(np.uint8)) * 255
-    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        return []
-    points = []
-    for cnt in contours:
-        if len(cnt) < num_points:
-            pts = cnt[:, 0, :]
-        else:
-            idxs = np.linspace(0, len(cnt)-1, num_points, dtype=int)
-            pts = cnt[idxs, 0, :]
-        points.extend([tuple(pt) for pt in pts])
-    return points
-
-def get_connected_components(mask):
-    labeled, n = scipy.ndimage.label(mask)
-    masks = [(labeled == i+1) for i in range(n)]
-    return masks
-
-def process_rest_frames_similarity():
-    print("[類似度で処理:領域ごと追跡] 開始", flush=True)
-    method = "similarity"
-    out_dir = os.path.join(masks_dir, method)
-    main_dir = os.path.join(out_dir, "main")
-    other_dir = os.path.join(out_dir, "other")
-    main_only_dir = os.path.join(out_dir, "main_only")
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(main_dir, exist_ok=True)
-    os.makedirs(other_dir, exist_ok=True)
-    os.makedirs(main_only_dir, exist_ok=True)
-    # 1フレーム目のマスクを保存
-    save_mask(mask_main, os.path.join(main_dir, os.path.basename(frame_paths[0])))
-    save_mask(mask_other, os.path.join(other_dir, os.path.basename(frame_paths[0])))
-    save_mask(mask_main_only, os.path.join(main_only_dir, os.path.basename(frame_paths[0])))
-    save_mask(mask_main_only, os.path.join(out_dir, os.path.basename(frame_paths[0])))
-    prev_mask = mask_main_only.copy()
-    for i, frame_path in enumerate(frame_paths[1:], 1):
-        img = np.array(Image.open(frame_path).convert("RGB"))
-        predictor.set_image(img)
-        prev_regions = get_connected_components(prev_mask)
-        curr_masks = []
-        for region in prev_regions:
-            centroid = mask_centroid(region)
-            if centroid is None:
-                continue
-            input_point = np.array([centroid])
-            input_label = np.array([1])
-            masks, scores, logits = predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                multimask_output=True
-            )
-            # regionとIoU最大のマスクを選ぶ
-            ious = [iou(region, m) for m in masks]
-            best_idx = int(np.argmax(ious))
-            best_mask = masks[best_idx]
-            curr_masks.append(best_mask)
-        if curr_masks:
-            combined_mask = np.any(curr_masks, axis=0)
-        else:
-            combined_mask = np.zeros_like(prev_mask)
-        # main: 最初の領域に最もIoUが高いものをmainとする
-        if curr_masks:
-            prev_main = get_connected_components(prev_mask)[0]
-            ious_main = [iou(prev_main, m) for m in curr_masks]
-            main_idx = int(np.argmax(ious_main))
-            main_mask = curr_masks[main_idx]
-            # other: main以外
-            other_masks = [m for j, m in enumerate(curr_masks) if j != main_idx]
-            if other_masks:
-                other_mask = np.any(other_masks, axis=0)
-            else:
-                other_mask = np.zeros_like(main_mask)
-            # main_only: main - other
-            main_only_mask = np.logical_and(main_mask, np.logical_not(other_mask))
-        else:
-            main_mask = np.zeros_like(prev_mask)
-            other_mask = np.zeros_like(prev_mask)
-            main_only_mask = np.zeros_like(prev_mask)
-        prev_mask = combined_mask
-        # 保存
-        save_mask(main_mask, os.path.join(main_dir, os.path.basename(frame_paths[i])))
-        save_mask(other_mask, os.path.join(other_dir, os.path.basename(frame_paths[i])))
-        save_mask(main_only_mask, os.path.join(main_only_dir, os.path.basename(frame_paths[i])))
-        save_mask(main_only_mask, os.path.join(out_dir, os.path.basename(frame_paths[i])))
-        print(f"frame {i}: similarity mask saved (regions={len(curr_masks)})", flush=True)
-    print(f"[類似度で処理] 完了: {out_dir}", flush=True)
