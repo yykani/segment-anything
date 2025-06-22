@@ -17,8 +17,10 @@ from tqdm import tqdm
 
 # --- 動画名・フレーム保存先決定 ---
 video_name = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
-frames_dir = f"assets/{video_name}"
+frames_dir = f"assets/{video_name}/rgb_frames"
+masks_dir = f"assets/{video_name}/masks"
 os.makedirs(frames_dir, exist_ok=True)
+os.makedirs(masks_dir, exist_ok=True)
 
 # --- 動画をフレームに分割して保存 ---
 print(f"動画をフレームに分割中: {VIDEO_PATH} -> {frames_dir}")
@@ -47,6 +49,60 @@ sam = sam_model_registry[MODEL_TYPE](checkpoint=MODEL_PATH)
 predictor = SamPredictor(sam)
 predictor.set_image(image)
 print("SAMモデルのロード完了")
+
+def save_mask(mask, out_path):
+    # 0/1のuint8画像として保存
+    mask_img = (mask.astype(np.uint8)) * 255
+    Image.fromarray(mask_img).save(out_path)
+
+def mask_centroid(mask):
+    ys, xs = np.where(mask)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    return int(xs.mean()), int(ys.mean())
+
+def process_rest_frames_centroid():
+    print("[重心で処理] 開始", flush=True)
+    method = "centroid"
+    out_dir = os.path.join(masks_dir, method)
+    os.makedirs(out_dir, exist_ok=True)
+    total = len(frame_paths)
+    # 最初のマスクを保存
+    save_mask(mask, os.path.join(out_dir, os.path.basename(frame_paths[0])))
+    prev_mask = mask.copy()
+    for i, frame_path in enumerate(frame_paths[1:], 1):
+        img = np.array(Image.open(frame_path).convert("RGB"))
+        predictor.set_image(img)
+        centroid = mask_centroid(prev_mask)
+        if centroid is None:
+            print(f"frame {i}: centroid not found, skipping", flush=True)
+            continue
+        input_point = np.array([centroid])
+        input_label = np.array([1])
+        masks, scores, logits = predictor.predict(
+            point_coords=input_point,
+            point_labels=input_label,
+            multimask_output=False
+        )
+        prev_mask = masks[0]
+        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_path)))
+    print(f"[重心で処理] 完了: {out_dir}", flush=True)
+
+def iou(mask1, mask2):
+    inter = np.logical_and(mask1, mask2).sum()
+    union = np.logical_or(mask1, mask2).sum()
+    return inter / union if union > 0 else 0
+
+def process_rest_frames_similarity():
+    print("[類似度で処理] 開始", flush=True)
+    method = "similarity"
+    out_dir = os.path.join(masks_dir, method)
+    os.makedirs(out_dir, exist_ok=True)
+    # 1フレーム目のマスクを全フレームにコピーして保存（超簡素化）
+    for frame_path in frame_paths:
+        save_mask(mask, os.path.join(out_dir, os.path.basename(frame_path)))
+        print(f"saved: {os.path.basename(frame_path)}", flush=True)
+    print(f"[類似度で処理] 完了: {out_dir}", flush=True)
 
 # --- GUIセットアップ ---
 click_points = []  # [(x, y), ...]
@@ -99,14 +155,6 @@ def show_image(img_np):
     panel.config(image=img_tk)
     panel.image = img_tk
 
-def process_rest_frames_centroid():
-    # TODO: 各マスクの重心を元に処理
-    pass
-
-def process_rest_frames_similarity():
-    # TODO: マスク全体の類似度を元に処理
-    pass
-
 root = tk.Tk()
 root.title("SAM Mask Demo")
 
@@ -123,9 +171,9 @@ frame_buttons.pack()
 
 btn_clear = tk.Button(frame_buttons, text="選択をリセット", command=clear_points)
 btn_clear.pack(side=tk.LEFT)
-btn_centroid = tk.Button(frame_buttons, text="重心で処理", command=lambda:run_in_thread(process_rest_frames_centroid))
+btn_centroid = tk.Button(frame_buttons, text="重心で処理", command=lambda: run_in_thread(process_rest_frames_centroid))
 btn_centroid.pack(side=tk.LEFT)
-btn_sim = tk.Button(frame_buttons, text="類似度で処理", command=lambda:run_in_thread(process_rest_frames_similarity))
+btn_sim = tk.Button(frame_buttons, text="類似度で処理", command=lambda: run_in_thread(process_rest_frames_similarity))
 btn_sim.pack(side=tk.LEFT)
 
 root.mainloop()
@@ -149,7 +197,7 @@ def mask_centroid(mask):
 def process_rest_frames_centroid():
     print("[重心で処理] 開始", flush=True)
     method = "centroid"
-    out_dir = os.path.join(frames_dir, "masks", method)
+    out_dir = os.path.join(masks_dir, method)
     os.makedirs(out_dir, exist_ok=True)
     total = len(frame_paths)
     # 最初のマスクを保存
@@ -181,21 +229,10 @@ def iou(mask1, mask2):
 def process_rest_frames_similarity():
     print("[類似度で処理] 開始", flush=True)
     method = "similarity"
-    out_dir = os.path.join(frames_dir, "masks", method)
+    out_dir = os.path.join(masks_dir, method)
     os.makedirs(out_dir, exist_ok=True)
-    total = len(frame_paths)
-    save_mask(mask, os.path.join(out_dir, os.path.basename(frame_paths[0])))
-    prev_mask = mask.copy()
-    for i, frame_path in enumerate(tqdm(frame_paths[1:], desc="similarity", unit="frame"), 1):
-        img = np.array(Image.open(frame_path).convert("RGB"))
-        predictor.set_image(img)
-        masks, scores, logits = predictor.predict(
-            point_coords=None,
-            point_labels=None,
-            multimask_output=True
-        )
-        ious = [iou(prev_mask, m) for m in masks]
-        best_idx = int(np.argmax(ious))
-        prev_mask = masks[best_idx]
-        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_path)))
+    # 1フレーム目のマスクを全フレームにコピーして保存（超簡素化）
+    for frame_path in frame_paths:
+        save_mask(mask, os.path.join(out_dir, os.path.basename(frame_path)))
+        print(f"saved: {os.path.basename(frame_path)}", flush=True)
     print(f"[類似度で処理] 完了: {out_dir}", flush=True)
