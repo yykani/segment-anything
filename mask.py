@@ -14,6 +14,7 @@ from segment_anything import sam_model_registry, SamPredictor
 import threading
 from tkinter import ttk
 from tqdm import tqdm
+import scipy.ndimage
 
 # --- 動画名・フレーム保存先決定 ---
 video_name = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
@@ -94,49 +95,76 @@ def iou(mask1, mask2):
     return inter / union if union > 0 else 0
 
 def mask_sample_points(mask, num_points=8):
-    """マスクの輪郭から等間隔でnum_points個の点をサンプリング"""
+    """マスクのすべての輪郭から等間隔でnum_points個ずつ点をサンプリング"""
     import cv2
     mask_uint8 = (mask.astype(np.uint8)) * 255
     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return []
-    cnt = max(contours, key=cv2.contourArea)
-    if len(cnt) < num_points:
-        points = cnt[:, 0, :]
-    else:
-        idxs = np.linspace(0, len(cnt)-1, num_points, dtype=int)
-        points = cnt[idxs, 0, :]
-    return [tuple(pt) for pt in points]
+    points = []
+    for cnt in contours:
+        if len(cnt) < num_points:
+            pts = cnt[:, 0, :]
+        else:
+            idxs = np.linspace(0, len(cnt)-1, num_points, dtype=int)
+            pts = cnt[idxs, 0, :]
+        points.extend([tuple(pt) for pt in pts])
+    return points
+
+def get_connected_components(mask):
+    labeled, n = scipy.ndimage.label(mask)
+    masks = [(labeled == i+1) for i in range(n)]
+    return masks
 
 def process_rest_frames_similarity():
-    print("[類似度で処理:複数点] 開始", flush=True)
+    print("[類似度で処理:領域ごと追跡] 開始", flush=True)
     method = "similarity"
     out_dir = os.path.join(masks_dir, method)
+    ref_dir = os.path.join(out_dir, "with_ref_points")
     os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(ref_dir, exist_ok=True)
     # 1フレーム目のマスクを保存
     save_mask(mask, os.path.join(out_dir, os.path.basename(frame_paths[0])))
     prev_mask = mask.copy()
     for i, frame_path in enumerate(frame_paths[1:], 1):
         img = np.array(Image.open(frame_path).convert("RGB"))
         predictor.set_image(img)
-        # 前マスクの輪郭から複数点をサンプリング
-        points = mask_sample_points(prev_mask, num_points=8)
-        if not points:
-            print(f"frame {i}: no points found, skipping", flush=True)
-            continue
-        input_point = np.array(points)
-        input_label = np.ones(len(points), dtype=int)
-        masks, scores, logits = predictor.predict(
-            point_coords=input_point,
-            point_labels=input_label,
-            multimask_output=True
-        )
-        # 前マスクとIoU最大のマスクを選択
-        ious = [iou(prev_mask, m) for m in masks]
-        best_idx = int(np.argmax(ious))
-        prev_mask = masks[best_idx]
-        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_path)))
-        print(f"frame {i}: similarity mask saved (IoU={ious[best_idx]:.3f})", flush=True)
+        prev_regions = get_connected_components(prev_mask)
+        curr_masks = []
+        curr_points = []
+        for region in prev_regions:
+            centroid = mask_centroid(region)
+            if centroid is None:
+                continue
+            input_point = np.array([centroid])
+            input_label = np.array([1])
+            masks, scores, logits = predictor.predict(
+                point_coords=input_point,
+                point_labels=input_label,
+                multimask_output=True
+            )
+            # regionとIoU最大のマスクを選ぶ
+            ious = [iou(region, m) for m in masks]
+            best_idx = int(np.argmax(ious))
+            best_mask = masks[best_idx]
+            curr_masks.append(best_mask)
+            curr_points.append(centroid)
+        if curr_masks:
+            combined_mask = np.any(curr_masks, axis=0)
+        else:
+            combined_mask = np.zeros_like(prev_mask)
+        prev_mask = combined_mask
+        save_mask(combined_mask, os.path.join(out_dir, os.path.basename(frame_path)))
+        # オーバーレイ画像も保存
+        overlay = img.copy()
+        mask_color = np.zeros_like(overlay)
+        mask_color[combined_mask] = [0, 255, 0]
+        overlay = cv2.addWeighted(overlay, 0.7, mask_color, 0.3, 0)
+        for x, y in curr_points:
+            cv2.circle(overlay, (int(x), int(y)), 6, (0, 0, 255), -1)
+        overlay_path = os.path.join(ref_dir, os.path.basename(frame_path))
+        Image.fromarray(overlay).save(overlay_path)
+        print(f"frame {i}: similarity mask saved (regions={len(curr_masks)})", flush=True)
     print(f"[類似度で処理] 完了: {out_dir}", flush=True)
 
 # --- GUIセットアップ ---
@@ -262,47 +290,74 @@ def iou(mask1, mask2):
     return inter / union if union > 0 else 0
 
 def mask_sample_points(mask, num_points=8):
-    """マスクの輪郭から等間隔でnum_points個の点をサンプリング"""
+    """マスクのすべての輪郭から等間隔でnum_points個ずつ点をサンプリング"""
     import cv2
     mask_uint8 = (mask.astype(np.uint8)) * 255
     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return []
-    cnt = max(contours, key=cv2.contourArea)
-    if len(cnt) < num_points:
-        points = cnt[:, 0, :]
-    else:
-        idxs = np.linspace(0, len(cnt)-1, num_points, dtype=int)
-        points = cnt[idxs, 0, :]
-    return [tuple(pt) for pt in points]
+    points = []
+    for cnt in contours:
+        if len(cnt) < num_points:
+            pts = cnt[:, 0, :]
+        else:
+            idxs = np.linspace(0, len(cnt)-1, num_points, dtype=int)
+            pts = cnt[idxs, 0, :]
+        points.extend([tuple(pt) for pt in pts])
+    return points
+
+def get_connected_components(mask):
+    labeled, n = scipy.ndimage.label(mask)
+    masks = [(labeled == i+1) for i in range(n)]
+    return masks
 
 def process_rest_frames_similarity():
-    print("[類似度で処理:複数点] 開始", flush=True)
+    print("[類似度で処理:領域ごと追跡] 開始", flush=True)
     method = "similarity"
     out_dir = os.path.join(masks_dir, method)
+    ref_dir = os.path.join(out_dir, "with_ref_points")
     os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(ref_dir, exist_ok=True)
     # 1フレーム目のマスクを保存
     save_mask(mask, os.path.join(out_dir, os.path.basename(frame_paths[0])))
     prev_mask = mask.copy()
     for i, frame_path in enumerate(frame_paths[1:], 1):
         img = np.array(Image.open(frame_path).convert("RGB"))
         predictor.set_image(img)
-        # 前マスクの輪郭から複数点をサンプリング
-        points = mask_sample_points(prev_mask, num_points=8)
-        if not points:
-            print(f"frame {i}: no points found, skipping", flush=True)
-            continue
-        input_point = np.array(points)
-        input_label = np.ones(len(points), dtype=int)
-        masks, scores, logits = predictor.predict(
-            point_coords=input_point,
-            point_labels=input_label,
-            multimask_output=True
-        )
-        # 前マスクとIoU最大のマスクを選択
-        ious = [iou(prev_mask, m) for m in masks]
-        best_idx = int(np.argmax(ious))
-        prev_mask = masks[best_idx]
-        save_mask(prev_mask, os.path.join(out_dir, os.path.basename(frame_path)))
-        print(f"frame {i}: similarity mask saved (IoU={ious[best_idx]:.3f})", flush=True)
+        prev_regions = get_connected_components(prev_mask)
+        curr_masks = []
+        curr_points = []
+        for region in prev_regions:
+            centroid = mask_centroid(region)
+            if centroid is None:
+                continue
+            input_point = np.array([centroid])
+            input_label = np.array([1])
+            masks, scores, logits = predictor.predict(
+                point_coords=input_point,
+                point_labels=input_label,
+                multimask_output=True
+            )
+            # regionとIoU最大のマスクを選ぶ
+            ious = [iou(region, m) for m in masks]
+            best_idx = int(np.argmax(ious))
+            best_mask = masks[best_idx]
+            curr_masks.append(best_mask)
+            curr_points.append(centroid)
+        if curr_masks:
+            combined_mask = np.any(curr_masks, axis=0)
+        else:
+            combined_mask = np.zeros_like(prev_mask)
+        prev_mask = combined_mask
+        save_mask(combined_mask, os.path.join(out_dir, os.path.basename(frame_path)))
+        # オーバーレイ画像も保存
+        overlay = img.copy()
+        mask_color = np.zeros_like(overlay)
+        mask_color[combined_mask] = [0, 255, 0]
+        overlay = cv2.addWeighted(overlay, 0.7, mask_color, 0.3, 0)
+        for x, y in curr_points:
+            cv2.circle(overlay, (int(x), int(y)), 6, (0, 0, 255), -1)
+        overlay_path = os.path.join(ref_dir, os.path.basename(frame_path))
+        Image.fromarray(overlay).save(overlay_path)
+        print(f"frame {i}: similarity mask saved (regions={len(curr_masks)})", flush=True)
     print(f"[類似度で処理] 完了: {out_dir}", flush=True)
